@@ -151,7 +151,7 @@ export interface LogitLensParams {
   targetIds?: number[];
   /** Reuse hidden states from the previous call (prompt is ignored) */
   reuse?: boolean;
-  /** Max prompt length in tokens (default 64) */
+  /** Max prompt length in tokens (default 256) */
   maxTokens?: number;
 }
 

@@ -18,9 +18,14 @@
 // internal header, needed for output_norm / output weights
 #include "../llama.cpp/src/llama-model.h"
 
+// tokens per llama_decode call; bounds the logits buffers llama.cpp allocates (n_vocab floats per token)
+static const int lens_batch = 64;
+
 struct lens_capture
 {
   bool active = false;
+  bool got_embd = false; // per decode call
+  bool stop = false;     // per decode call, set after the last layer
   int64_t n_embd = 0;
   // hidden[0] is the token embedding, hidden[il + 1] is l_out-il; each is [n_tokens][n_embd]
   std::vector<std::vector<float>> hidden;
@@ -48,18 +53,25 @@ static bool lens_cb_eval(ggml_tensor *t, bool ask, void *user_data)
   auto *cap = (lens_capture *)user_data;
   if (!cap->active)
     return !ask;
+  // after the last layer: run only the first node of each remaining split, then break it
+  if (cap->stop)
+    return ask;
   const int slot = lens_tensor_slot(t);
   const bool want = slot >= 0 && slot < (int)cap->hidden.size() && t->type == GGML_TYPE_F32 && t->ne[0] == cap->n_embd && ggml_is_contiguous(t);
   if (ask)
     return want;
   // keep only the first embedding lookup, later ones belong to unused input paths
-  if (want && !(slot == 0 && !cap->hidden[0].empty()))
+  if (want && !(slot == 0 && cap->got_embd))
   {
     auto &dst = cap->hidden[slot];
-    dst.resize(ggml_nelements(t));
-    ggml_backend_tensor_get(t, dst.data(), 0, ggml_nbytes(t));
+    const size_t n0 = dst.size();
+    dst.resize(n0 + ggml_nelements(t));
+    ggml_backend_tensor_get(t, dst.data() + n0, 0, ggml_nbytes(t));
+    cap->got_embd |= slot == 0;
+    // false stops the rest of this split, so the output head is not computed
+    cap->stop = slot == (int)cap->hidden.size() - 1;
   }
-  return true;
+  return !cap->stop;
 }
 
 struct lens_result
@@ -261,6 +273,24 @@ static std::vector<float> lens_gather_rows(const lens_capture &cap, int n_tokens
   return rows;
 }
 
+// decode tokens [i0, i0 + n) at their positions; all rows are outputs, else the last layer is cropped to the output rows
+static int lens_decode(llama_context *lctx, const std::vector<llama_token> &tokens, int i0, int n)
+{
+  llama_batch batch = llama_batch_init(n, 0, 1);
+  for (int i = 0; i < n; i++)
+  {
+    batch.token[i] = tokens[i0 + i];
+    batch.pos[i] = i0 + i;
+    batch.n_seq_id[i] = 1;
+    batch.seq_id[i][0] = 0;
+    batch.logits[i] = true;
+  }
+  batch.n_tokens = n;
+  const int ret = llama_decode(lctx, batch);
+  llama_batch_free(batch);
+  return ret;
+}
+
 // run the model on tokens, capture all layers, project layers [layer_begin, layer_end)
 // targets: empty -> per position, use the final layer's top-1 token
 static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &proj, const std::vector<llama_token> &tokens, int k, int layer_begin, int layer_end, const std::vector<int32_t> &targets_per_pos, lens_run_output &out, bool reuse_hidden = false)
@@ -270,8 +300,8 @@ static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &pro
   const int n_tokens = (int)tokens.size();
   if (n_tokens == 0)
     throw std::runtime_error("lens: empty prompt");
-  if (n_tokens > (int)llama_n_ubatch(lctx))
-    throw std::runtime_error("lens: prompt too long (" + std::to_string(n_tokens) + " > " + std::to_string(llama_n_ubatch(lctx)) + " tokens)");
+  if (n_tokens > (int)llama_n_ctx(lctx))
+    throw std::runtime_error("lens: prompt too long (" + std::to_string(n_tokens) + " > " + std::to_string(llama_n_ctx(lctx)) + " tokens)");
   layer_begin = std::max(0, layer_begin);
   layer_end = (layer_end <= 0 || layer_end > n_layer + 1) ? n_layer + 1 : layer_end;
   if (layer_begin >= layer_end)
@@ -281,24 +311,19 @@ static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &pro
   {
     cap.reset(llama_model_n_embd(model), n_layer);
     llama_memory_clear(llama_get_memory(lctx), true);
-    llama_batch batch = llama_batch_init(n_tokens, 0, 1);
-    for (int i = 0; i < n_tokens; i++)
-    {
-      batch.token[i] = tokens[i];
-      batch.pos[i] = i;
-      batch.n_seq_id[i] = 1;
-      batch.seq_id[i][0] = 0;
-      batch.logits[i] = true; // keep all rows through the last layer
-    }
-    batch.n_tokens = n_tokens;
-    cap.active = true;
+    const int n_batch = std::min<int>(llama_n_batch(lctx), llama_n_ubatch(lctx));
     const int64_t t0 = ggml_time_us();
-    const int ret = llama_decode(lctx, batch);
+    for (int i0 = 0; i0 < n_tokens; i0 += n_batch)
+    {
+      cap.active = true;
+      cap.got_embd = false;
+      cap.stop = false;
+      const int ret = lens_decode(lctx, tokens, i0, std::min(n_batch, n_tokens - i0));
+      cap.active = false;
+      if (ret != 0)
+        throw std::runtime_error("lens: llama_decode failed with code " + std::to_string(ret));
+    }
     out.t_decode_ms = (ggml_time_us() - t0) / 1000.0;
-    cap.active = false;
-    llama_batch_free(batch);
-    if (ret != 0)
-      throw std::runtime_error("lens: llama_decode failed with code " + std::to_string(ret));
   }
 
   const int64_t t_proj0 = ggml_time_us();
