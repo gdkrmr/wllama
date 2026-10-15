@@ -964,6 +964,7 @@ export class Wllama {
       targetIds: i32(result.target_ids),
       targetProbs: f32(result.target_prob),
       targetRanks: i32(result.target_rank),
+      kl: f32(result.kl),
       pieces,
       tDecodeMs: result.t_decode_ms,
       tProjectMs: result.t_project_ms,

@@ -72,6 +72,7 @@ struct lens_result
   std::vector<int32_t> target_ids; // [n_rows]
   std::vector<float> target_prob;  // [n_rows]
   std::vector<int32_t> target_rank; // [n_rows], 0 = top token
+  std::vector<float> kl;           // [n_rows], nats, KL(final layer || row) at the same position
 };
 
 static bool lens_arch_supported(const llama_model *model, std::string &arch_out)
@@ -92,6 +93,10 @@ struct lens_projector
   std::vector<ggml_backend_t> backends;
   ggml_backend_sched_t sched = nullptr;
   size_t max_chunk_bytes = 32u * 1024 * 1024;
+  // final layer log-probs per position, kept on the output device for KL
+  ggml_context *final_ctx = nullptr;
+  ggml_backend_buffer_t final_buf = nullptr;
+  ggml_tensor *final_logp = nullptr; // [n_vocab, n_pos]
 
   void init(const llama_model *m)
   {
@@ -109,10 +114,35 @@ struct lens_projector
 
   ~lens_projector()
   {
+    free_final();
     if (sched)
       ggml_backend_sched_free(sched);
     for (auto b : backends)
       ggml_backend_free(b);
+  }
+
+  void free_final()
+  {
+    if (final_buf)
+      ggml_backend_buffer_free(final_buf);
+    if (final_ctx)
+      ggml_free(final_ctx);
+    final_buf = nullptr;
+    final_ctx = nullptr;
+    final_logp = nullptr;
+  }
+
+  void alloc_final(int n_pos)
+  {
+    if (final_logp && final_logp->ne[1] >= n_pos)
+      return;
+    free_final();
+    ggml_init_params ip = {ggml_tensor_overhead(), nullptr, true};
+    final_ctx = ggml_init(ip);
+    final_logp = ggml_new_tensor_2d(final_ctx, GGML_TYPE_F32, model->output->ne[1], n_pos);
+    final_buf = ggml_backend_alloc_ctx_tensors(final_ctx, backends[0]);
+    if (!final_buf)
+      throw std::runtime_error("lens: failed to allocate final layer buffer");
   }
 
   const char *backend_name() const
@@ -121,7 +151,8 @@ struct lens_projector
   }
 
   // rows: [n_rows][n_embd]; targets: [n_rows] or empty (then target = top-1 of each row)
-  void project_chunk(const float *rows, int n_rows, int k, const int32_t *targets, lens_result &out, int row_offset)
+  // pos: [n_rows] row in final_logp for KL, or null; store_final: write log-probs to final_logp at row_offset
+  void project_chunk(const float *rows, int n_rows, int k, const int32_t *targets, lens_result &out, int row_offset, const int32_t *pos, bool store_final)
   {
     const int64_t n_embd = model->hparams.n_embd;
     const int64_t n_vocab = model->output->ne[1];
@@ -157,12 +188,33 @@ struct lens_projector
     ggml_tensor *tgt_z = ggml_reshape_2d(ctx, ggml_get_rows(ctx, z3, inp_tgt), 1, n_rows);
     ggml_tensor *rank = ggml_sum_rows(ctx, ggml_step(ctx, ggml_sub(ctx, z, tgt_z))); // [1, n_rows]
 
+    // log p = z - lse, lse = z_max - log(p_max); no clamp, so tiny p stay exact
+    ggml_tensor *amax = ggml_reshape_2d(ctx, ggml_argmax(ctx, z), 1, n_rows);
+    ggml_tensor *z_max = ggml_reshape_2d(ctx, ggml_get_rows(ctx, z3, amax), 1, n_rows);
+    ggml_tensor *p_max = ggml_reshape_2d(ctx, ggml_get_rows(ctx, p3, amax), 1, n_rows);
+    ggml_tensor *logp = ggml_sub(ctx, z, ggml_sub(ctx, z_max, ggml_log(ctx, p_max)));
+
+    ggml_tensor *inp_pos = nullptr;
+    ggml_tensor *kl = nullptr;
+    if (pos)
+    {
+      inp_pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_rows);
+      ggml_set_input(inp_pos);
+      ggml_tensor *lf = ggml_get_rows(ctx, final_logp, inp_pos); // [n_vocab, n_rows]
+      kl = ggml_sum_rows(ctx, ggml_mul(ctx, ggml_exp(ctx, lf), ggml_sub(ctx, lf, logp))); // [1, n_rows]
+      ggml_set_output(kl);
+    }
+
     for (ggml_tensor *t : {top, top_p, ent, tgt_p, rank})
       ggml_set_output(t);
 
     ggml_cgraph *gf = ggml_new_graph(ctx);
     for (ggml_tensor *t : {top, top_p, ent, tgt_p, rank})
       ggml_build_forward_expand(gf, t);
+    if (kl)
+      ggml_build_forward_expand(gf, kl);
+    if (store_final)
+      ggml_build_forward_expand(gf, ggml_cpy(ctx, logp, ggml_view_2d(ctx, final_logp, final_logp->ne[0], n_rows, final_logp->nb[1], row_offset * final_logp->nb[1])));
 
     ggml_backend_sched_reset(sched);
     if (!ggml_backend_sched_alloc_graph(sched, gf))
@@ -176,6 +228,8 @@ struct lens_projector
       std::copy(targets, targets + n_rows, tgt.begin());
     ggml_backend_tensor_set(inp, rows, 0, ggml_nbytes(inp));
     ggml_backend_tensor_set(inp_tgt, tgt.data(), 0, ggml_nbytes(inp_tgt));
+    if (inp_pos)
+      ggml_backend_tensor_set(inp_pos, pos, 0, ggml_nbytes(inp_pos));
 
     if (ggml_backend_sched_graph_compute(sched, gf) != GGML_STATUS_SUCCESS)
     {
@@ -184,12 +238,14 @@ struct lens_projector
     }
 
     std::vector<int32_t> h_top(k * n_rows);
-    std::vector<float> h_top_p(k * n_rows), h_ent(n_rows), h_tgt_p(n_rows), h_rank(n_rows);
+    std::vector<float> h_top_p(k * n_rows), h_ent(n_rows), h_tgt_p(n_rows), h_rank(n_rows), h_kl(n_rows, 0.0f);
     ggml_backend_tensor_get(top, h_top.data(), 0, ggml_nbytes(top));
     ggml_backend_tensor_get(top_p, h_top_p.data(), 0, ggml_nbytes(top_p));
     ggml_backend_tensor_get(ent, h_ent.data(), 0, ggml_nbytes(ent));
     ggml_backend_tensor_get(tgt_p, h_tgt_p.data(), 0, ggml_nbytes(tgt_p));
     ggml_backend_tensor_get(rank, h_rank.data(), 0, ggml_nbytes(rank));
+    if (kl)
+      ggml_backend_tensor_get(kl, h_kl.data(), 0, ggml_nbytes(kl));
     ggml_free(ctx);
 
     std::vector<int> order(k);
@@ -209,10 +265,11 @@ struct lens_projector
       out.target_ids[dst] = tgt[r];
       out.target_prob[dst] = h_tgt_p[r];
       out.target_rank[dst] = (int32_t)h_rank[r];
+      out.kl[dst] = std::max(0.0f, h_kl[r]); // rounding can give tiny negatives
     }
   }
 
-  void project(const float *rows, int n_rows, int k, const int32_t *targets, lens_result &out)
+  void project(const float *rows, int n_rows, int k, const int32_t *targets, lens_result &out, const int32_t *pos = nullptr, bool store_final = false)
   {
     const int64_t n_embd = model->hparams.n_embd;
     const int64_t n_vocab = model->output->ne[1];
@@ -226,11 +283,14 @@ struct lens_projector
     out.target_ids.assign(n_rows, 0);
     out.target_prob.assign(n_rows, 0.0f);
     out.target_rank.assign(n_rows, 0);
+    out.kl.assign(n_rows, 0.0f);
+    if (store_final)
+      alloc_final(n_rows);
 
     for (int r0 = 0; r0 < n_rows; r0 += chunk)
     {
       const int n = std::min(chunk, n_rows - r0);
-      project_chunk(rows + r0 * n_embd, n, k, targets ? targets + r0 : nullptr, out, r0);
+      project_chunk(rows + r0 * n_embd, n, k, targets ? targets + r0 : nullptr, out, r0, pos ? pos + r0 : nullptr, store_final);
     }
   }
 };
@@ -302,28 +362,31 @@ static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &pro
   }
 
   const int64_t t_proj0 = ggml_time_us();
+  // final layer first: keeps its log-probs for KL and gives the default targets
+  std::vector<float> last = lens_gather_rows(cap, n_tokens, n_layer, n_layer + 1);
+  lens_result r;
+  proj.project(last.data(), n_tokens, 1, nullptr, r, nullptr, true);
   std::vector<int32_t> targets(targets_per_pos);
   if (targets.empty())
-  {
-    // final layer top-1 per position
-    std::vector<float> last = lens_gather_rows(cap, n_tokens, n_layer, n_layer + 1);
-    lens_result r;
-    proj.project(last.data(), n_tokens, 1, nullptr, r);
-    targets = r.top_ids;
-  }
+    targets = r.top_ids; // final layer top-1 per position
   if ((int)targets.size() != n_tokens)
     throw std::runtime_error("lens: targets must have one entry per token");
 
   const int n_layers = layer_end - layer_begin;
   std::vector<float> rows = lens_gather_rows(cap, n_tokens, layer_begin, layer_end);
-  std::vector<int32_t> row_targets;
+  std::vector<int32_t> row_targets, row_pos;
   row_targets.reserve(n_layers * n_tokens);
+  row_pos.reserve(n_layers * n_tokens);
   for (int l = 0; l < n_layers; l++)
+  {
     row_targets.insert(row_targets.end(), targets.begin(), targets.end());
+    for (int t = 0; t < n_tokens; t++)
+      row_pos.push_back(t);
+  }
 
   out.n_layers = n_layers;
   out.n_tokens = n_tokens;
   out.tokens = tokens;
-  proj.project(rows.data(), n_layers * n_tokens, k, row_targets.data(), out.res);
+  proj.project(rows.data(), n_layers * n_tokens, k, row_targets.data(), out.res, row_pos.data());
   out.t_project_ms = (ggml_time_us() - t_proj0) / 1000.0;
 }

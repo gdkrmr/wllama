@@ -726,6 +726,7 @@ struct glue_msg_logit_lens_res
   GLUE_FIELD(raw, target_ids)
   GLUE_FIELD(raw, target_prob)
   GLUE_FIELD(raw, target_rank)
+  GLUE_FIELD(raw, kl)
   GLUE_FIELD(arr_int, piece_ids)
   GLUE_FIELD(arr_str, pieces)
   GLUE_FIELD(float, t_decode_ms)
