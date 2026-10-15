@@ -975,7 +975,7 @@ struct wllama_context
 
     const bool reuse = req.reuse.not_null() && req.reuse.value && !lens_tokens.empty();
     std::vector<llama_token> tokens = reuse ? lens_tokens : common_tokenize(vocab, req.prompt.value, true, true);
-    const int max_tokens = req.max_tokens.not_null() ? req.max_tokens.value : 64;
+    const int max_tokens = req.max_tokens.not_null() ? req.max_tokens.value : 256;
     if ((int)tokens.size() > max_tokens)
     {
       res.message.value = "Prompt has " + std::to_string(tokens.size()) + " tokens, the limit is " + std::to_string(max_tokens);
@@ -986,11 +986,12 @@ struct wllama_context
     {
       if (lens_ctx)
         llama_free(lens_ctx);
-      lens_n_ctx = std::max(64, (int)tokens.size());
+      // round up, so a growing prompt does not recreate the context on every token
+      lens_n_ctx = std::max(1, ((int)tokens.size() + lens_batch - 1) / lens_batch) * lens_batch;
       auto cparams = llama_context_default_params();
       cparams.n_ctx = lens_n_ctx;
-      cparams.n_batch = lens_n_ctx;
-      cparams.n_ubatch = lens_n_ctx;
+      cparams.n_batch = lens_batch;
+      cparams.n_ubatch = lens_batch;
       cparams.n_seq_max = 1;
       cparams.n_threads = params.cpuparams.n_threads;
       cparams.n_threads_batch = params.cpuparams.n_threads;
