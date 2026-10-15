@@ -1013,7 +1013,19 @@ struct wllama_context
     if (req.target_ids.not_null())
       targets = req.target_ids.arr;
     if (targets.size() == 1 && tokens.size() > 1)
-      targets.assign(tokens.size(), targets[0]);
+    {
+      const int32_t t0 = targets[0]; // copy first, assign() may free the storage targets[0] lives in
+      targets.assign(tokens.size(), t0);
+    }
+    const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+    for (int32_t t : targets)
+    {
+      if (t < 0 || t >= n_vocab)
+      {
+        res.message.value = "Invalid target token id " + std::to_string(t);
+        return res;
+      }
+    }
 
     const int k = std::max(1, req.k.value);
     lens_run_output out;
