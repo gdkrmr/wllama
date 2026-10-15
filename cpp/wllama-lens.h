@@ -119,11 +119,16 @@ static bool lens_arch_supported(const llama_model *model, std::string &arch_out)
   char buf[128] = {0};
   llama_model_meta_val_str(model, "general.architecture", buf, sizeof(buf));
   arch_out = buf;
-  static const char *allowed[] = {"llama", "qwen2", "qwen3", "qwen35"};
+  static const char *allowed[] = {"llama", "qwen2", "qwen3", "qwen35", "gemma", "gemma2", "gemma3", "gemma4"};
   for (const char *a : allowed)
     if (arch_out == a)
       return true;
   return false;
+}
+
+static bool lens_is_gemma(const llama_model *model)
+{
+  return model->arch == LLM_ARCH_GEMMA || model->arch == LLM_ARCH_GEMMA2 || model->arch == LLM_ARCH_GEMMA3 || model->arch == LLM_ARCH_GEMMA4;
 }
 
 struct lens_projector
@@ -217,6 +222,10 @@ struct lens_projector
     ggml_tensor *z = ggml_mul_mat(ctx, model->output, x); // [n_vocab, n_rows]
     if (model->output_s)
       z = ggml_mul(ctx, z, model->output_s);
+    // gemma 1 has no soft-capping, its hparam keeps a non-zero default
+    const float softcap = lens_is_gemma(model) && model->arch != LLM_ARCH_GEMMA ? model->hparams.f_final_logit_softcapping : 0.0f;
+    if (softcap > 0.0f)
+      z = ggml_scale(ctx, ggml_tanh(ctx, ggml_scale(ctx, z, 1.0f / softcap)), softcap);
     ggml_tensor *p = ggml_soft_max(ctx, z);
 
     ggml_tensor *top = ggml_top_k(ctx, p, k); // [k, n_rows], unordered
@@ -407,6 +416,10 @@ static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &pro
         throw std::runtime_error("lens: llama_decode failed with code " + std::to_string(ret));
     }
     out.t_decode_ms = (ggml_time_us() - t0) / 1000.0;
+    // gemma scales the embeddings after the lookup we capture
+    if (lens_is_gemma(model))
+      for (float &v : cap.hidden[0])
+        v *= sqrtf((float)cap.n_embd);
   }
 
   const int64_t t_proj0 = ggml_time_us();
