@@ -1006,7 +1006,7 @@ struct wllama_context
     if (!lens_proj)
     {
       lens_proj = std::make_unique<lens_projector>();
-      lens_proj->init(model);
+      lens_proj->init(model, params.cpuparams.n_threads);
     }
 
     std::vector<int32_t> targets;

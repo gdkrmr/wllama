@@ -93,7 +93,8 @@ struct lens_projector
   ggml_backend_sched_t sched = nullptr;
   size_t max_chunk_bytes = 32u * 1024 * 1024;
 
-  void init(const llama_model *m)
+  // n_threads: CPU backend threads, 0 = ggml default; in wasm it must not exceed the pthread pool
+  void init(const llama_model *m, int n_threads = 0)
   {
     model = m;
     ggml_backend_dev_t dev = model->dev_output();
@@ -103,7 +104,10 @@ struct lens_projector
       if (b)
         backends.push_back(b);
     }
-    backends.push_back(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr));
+    ggml_backend_t cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    if (n_threads > 0)
+      ggml_backend_cpu_set_n_threads(cpu, n_threads);
+    backends.push_back(cpu);
     sched = ggml_backend_sched_new(backends.data(), nullptr, (int)backends.size(), 256, false, true);
   }
 
