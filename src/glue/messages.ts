@@ -788,6 +788,11 @@ export const GLUE_MESSAGE_PROTOTYPES: { [name: string]: GlueMessageProto } = {
         "isNullable": false
       },
       {
+        "type": "raw",
+        "name": "kl",
+        "isNullable": false
+      },
+      {
         "type": "arr_int",
         "name": "piece_ids",
         "isNullable": false
@@ -1034,6 +1039,7 @@ export interface GlueMsgLogitLensRes {
   target_ids: Uint8Array;
   target_prob: Uint8Array;
   target_rank: Uint8Array;
+  kl: Uint8Array;
   piece_ids: number[];
   pieces: string[];
   t_decode_ms: number;

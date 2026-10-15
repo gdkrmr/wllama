@@ -1067,6 +1067,7 @@ struct wllama_context
     lens_to_raw(out.res.target_ids, res.target_ids);
     lens_to_raw(out.res.target_prob, res.target_prob);
     lens_to_raw(out.res.target_rank, res.target_rank);
+    lens_to_raw(out.res.kl, res.kl);
     res.piece_ids.arr = std::move(ids);
     res.pieces.arr = std::move(pieces);
     res.t_decode_ms.value = out.t_decode_ms;

@@ -174,6 +174,8 @@ export interface LogitLensResult {
   targetProbs: Float32Array;
   /** 0 = target is the top token */
   targetRanks: Int32Array;
+  /** [nLayers * nTokens], KL(final layer || this layer) in nats at the same position; 0 on the final layer */
+  kl: Float32Array;
   /** token id -> text piece, for all ids in this result */
   pieces: Map<number, string>;
   /** forward pass with capture in ms, 0 when hidden states were reused */
