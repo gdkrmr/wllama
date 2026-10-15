@@ -119,7 +119,7 @@ static bool lens_arch_supported(const llama_model *model, std::string &arch_out)
   char buf[128] = {0};
   llama_model_meta_val_str(model, "general.architecture", buf, sizeof(buf));
   arch_out = buf;
-  static const char *allowed[] = {"llama", "qwen2", "qwen3", "qwen35", "gemma", "gemma2", "gemma3", "gemma4"};
+  static const char *allowed[] = {"llama", "qwen2", "qwen3", "qwen35", "gemma", "gemma2", "gemma3", "gemma4", "phi2", "phi3"};
   for (const char *a : allowed)
     if (arch_out == a)
       return true;
@@ -217,11 +217,16 @@ struct lens_projector
     ggml_tensor *inp_tgt = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 1, n_rows);
     ggml_set_input(inp_tgt);
 
-    ggml_tensor *x = ggml_rms_norm(ctx, inp, model->hparams.f_norm_rms_eps);
+    // phi2 uses LayerNorm, the others RMSNorm
+    ggml_tensor *x = model->arch == LLM_ARCH_PHI2 ? ggml_norm(ctx, inp, model->hparams.f_norm_eps) : ggml_rms_norm(ctx, inp, model->hparams.f_norm_rms_eps);
     x = ggml_mul(ctx, x, model->output_norm);
+    if (model->output_norm_b)
+      x = ggml_add(ctx, x, model->output_norm_b);
     ggml_tensor *z = ggml_mul_mat(ctx, model->output, x); // [n_vocab, n_rows]
     if (model->output_s)
       z = ggml_mul(ctx, z, model->output_s);
+    if (model->output_b)
+      z = ggml_add(ctx, z, model->output_b);
     // gemma 1 has no soft-capping, its hparam keeps a non-zero default
     const float softcap = lens_is_gemma(model) && model->arch != LLM_ARCH_GEMMA ? model->hparams.f_final_logit_softcapping : 0.0f;
     if (softcap > 0.0f)
