@@ -85,7 +85,34 @@ struct lens_result
   std::vector<float> target_prob;  // [n_rows]
   std::vector<int32_t> target_rank; // [n_rows], 0 = top token
   std::vector<float> kl;           // [n_rows], nats, KL(final layer || row) at the same position
+
+  void reset(int n, int k_)
+  {
+    n_rows = n;
+    k = k_;
+    top_ids.assign(n * k, 0);
+    top_probs.assign(n * k, 0.0f);
+    entropy.assign(n, 0.0f);
+    target_ids.assign(n, 0);
+    target_prob.assign(n, 0.0f);
+    target_rank.assign(n, 0);
+    kl.assign(n, 0.0f);
+  }
+
+  void copy_row(const lens_result &src, int s, int d)
+  {
+    std::copy_n(src.top_ids.begin() + s * k, k, top_ids.begin() + d * k);
+    std::copy_n(src.top_probs.begin() + s * k, k, top_probs.begin() + d * k);
+    entropy[d] = src.entropy[s];
+    target_ids[d] = src.target_ids[s];
+    target_prob[d] = src.target_prob[s];
+    target_rank[d] = src.target_rank[s];
+    kl[d] = src.kl[s];
+  }
 };
+
+// positions per projection block; bounds the final layer log-probs kept for KL
+static const int lens_pos_block = 64;
 
 static bool lens_arch_supported(const llama_model *model, std::string &arch_out)
 {
@@ -291,15 +318,7 @@ struct lens_projector
     const int64_t n_vocab = model->output->ne[1];
     const int chunk = std::max<int>(1, (int)(max_chunk_bytes / (n_vocab * sizeof(float))));
 
-    out.n_rows = n_rows;
-    out.k = k;
-    out.top_ids.assign(n_rows * k, 0);
-    out.top_probs.assign(n_rows * k, 0.0f);
-    out.entropy.assign(n_rows, 0.0f);
-    out.target_ids.assign(n_rows, 0);
-    out.target_prob.assign(n_rows, 0.0f);
-    out.target_rank.assign(n_rows, 0);
-    out.kl.assign(n_rows, 0.0f);
+    out.reset(n_rows, k);
     if (store_final)
       alloc_final(n_rows);
 
@@ -322,17 +341,17 @@ struct lens_run_output
   double t_project_ms = 0; // output head projection and top-k
 };
 
-// rows for layers [layer_begin, layer_end) of the captured hidden states
-static std::vector<float> lens_gather_rows(const lens_capture &cap, int n_tokens, int layer_begin, int layer_end)
+// rows for layers [layer_begin, layer_end) and positions [p0, p1) of the captured hidden states
+static std::vector<float> lens_gather_rows(const lens_capture &cap, int n_tokens, int layer_begin, int layer_end, int p0, int p1)
 {
   std::vector<float> rows;
-  rows.reserve((size_t)(layer_end - layer_begin) * n_tokens * cap.n_embd);
+  rows.reserve((size_t)(layer_end - layer_begin) * (p1 - p0) * cap.n_embd);
   for (int l = layer_begin; l < layer_end; l++)
   {
     const auto &h = cap.hidden[l];
     if ((int64_t)h.size() != n_tokens * cap.n_embd)
       throw std::runtime_error("lens: missing hidden state for layer slot " + std::to_string(l) + " (got " + std::to_string(h.size() / std::max<int64_t>(1, cap.n_embd)) + " rows)");
-    rows.insert(rows.end(), h.begin(), h.end());
+    rows.insert(rows.end(), h.begin() + p0 * cap.n_embd, h.begin() + p1 * cap.n_embd);
   }
   return rows;
 }
@@ -391,31 +410,46 @@ static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &pro
   }
 
   const int64_t t_proj0 = ggml_time_us();
-  // final layer first: keeps its log-probs for KL and gives the default targets
-  std::vector<float> last = lens_gather_rows(cap, n_tokens, n_layer, n_layer + 1);
-  lens_result r;
-  proj.project(last.data(), n_tokens, 1, nullptr, r, nullptr, true);
-  std::vector<int32_t> targets(targets_per_pos);
-  if (targets.empty())
-    targets = r.top_ids; // final layer top-1 per position
-  if ((int)targets.size() != n_tokens)
+  if (!targets_per_pos.empty() && (int)targets_per_pos.size() != n_tokens)
     throw std::runtime_error("lens: targets must have one entry per token");
-
+  // reuse with given targets: hidden states and KL are unchanged, so skip the final layer pass
+  const bool with_final = !reuse_hidden || targets_per_pos.empty();
   const int n_layers = layer_end - layer_begin;
-  std::vector<float> rows = lens_gather_rows(cap, n_tokens, layer_begin, layer_end);
-  std::vector<int32_t> row_targets, row_pos;
-  row_targets.reserve(n_layers * n_tokens);
-  row_pos.reserve(n_layers * n_tokens);
-  for (int l = 0; l < n_layers; l++)
-  {
-    row_targets.insert(row_targets.end(), targets.begin(), targets.end());
-    for (int t = 0; t < n_tokens; t++)
-      row_pos.push_back(t);
-  }
-
   out.n_layers = n_layers;
   out.n_tokens = n_tokens;
   out.tokens = tokens;
-  proj.project(rows.data(), n_layers * n_tokens, k, row_targets.data(), out.res, row_pos.data());
+  out.res.reset(n_layers * n_tokens, k);
+  for (int p0 = 0; p0 < n_tokens; p0 += lens_pos_block)
+  {
+    const int np = std::min(lens_pos_block, n_tokens - p0);
+    std::vector<int32_t> targets;
+    if (!targets_per_pos.empty())
+      targets.assign(targets_per_pos.begin() + p0, targets_per_pos.begin() + p0 + np);
+    if (with_final)
+    {
+      // final layer first: keeps its log-probs for KL and gives the default targets
+      std::vector<float> last = lens_gather_rows(cap, n_tokens, n_layer, n_layer + 1, p0, p0 + np);
+      lens_result r;
+      proj.project(last.data(), np, 1, nullptr, r, nullptr, true);
+      if (targets.empty())
+        targets = r.top_ids; // final layer top-1 per position
+    }
+
+    std::vector<float> rows = lens_gather_rows(cap, n_tokens, layer_begin, layer_end, p0, p0 + np);
+    std::vector<int32_t> row_targets, row_pos;
+    row_targets.reserve(n_layers * np);
+    row_pos.reserve(n_layers * np);
+    for (int l = 0; l < n_layers; l++)
+    {
+      row_targets.insert(row_targets.end(), targets.begin(), targets.end());
+      for (int t = 0; t < np; t++)
+        row_pos.push_back(t);
+    }
+    lens_result r;
+    proj.project(rows.data(), n_layers * np, k, row_targets.data(), r, with_final ? row_pos.data() : nullptr);
+    for (int l = 0; l < n_layers; l++)
+      for (int t = 0; t < np; t++)
+        out.res.copy_row(r, l * np + t, l * n_tokens + p0 + t);
+  }
   out.t_project_ms = (ggml_time_us() - t_proj0) / 1000.0;
 }
