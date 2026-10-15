@@ -6,6 +6,7 @@
 #include <sstream>
 #include <stdio.h>
 #include <cmath>
+#include <cstdarg>
 #include <fstream>
 #include <unordered_map>
 
@@ -27,6 +28,7 @@
 #include "ggml-backend.h"
 
 #include "glue.hpp"
+#include "wllama-lens.h"
 
 #ifdef WLLAMA_TEST_BACKEND
 int main_test_backend_ops(int argc, char **argv);
@@ -276,6 +278,13 @@ struct wllama_context
     int32_t n_tokens = 0;
   };
   std::unordered_map<int, decision_request> decision_reqs; // keyed by req_id
+
+  // logit lens uses its own context, so it does not touch the server slots
+  llama_context *lens_ctx = nullptr;
+  int lens_n_ctx = 0;
+  lens_capture lens_cap;
+  std::unique_ptr<lens_projector> lens_proj;
+  std::vector<llama_token> lens_tokens;
 
   struct console
   {
@@ -935,6 +944,120 @@ struct wllama_context
     }
 
     res.success.value = true;
+    return res;
+  }
+
+  template <typename T>
+  static void lens_to_raw(const std::vector<T> &src, glue_raw &dst)
+  {
+    dst.buf.resize(src.size() * sizeof(T));
+    memcpy(dst.buf.data(), src.data(), dst.buf.size());
+  }
+
+  glue_msg_logit_lens_res action_logit_lens(const char *req_raw)
+  {
+    PARSE_REQ(glue_msg_logit_lens_req);
+    glue_msg_logit_lens_res res;
+    res.success.value = false;
+    res.backend.value = "";
+    res.n_layers.value = 0;
+    res.n_tokens.value = 0;
+    res.k.value = 0;
+    res.t_decode_ms.value = 0;
+    res.t_project_ms.value = 0;
+
+    std::string arch;
+    if (!lens_arch_supported(model, arch))
+    {
+      res.message.value = "Logit lens does not support architecture \"" + arch + "\" (supported: llama, qwen2, qwen3, qwen35)";
+      return res;
+    }
+
+    const bool reuse = req.reuse.not_null() && req.reuse.value && !lens_tokens.empty();
+    std::vector<llama_token> tokens = reuse ? lens_tokens : common_tokenize(vocab, req.prompt.value, true, true);
+    const int max_tokens = req.max_tokens.not_null() ? req.max_tokens.value : 64;
+    if ((int)tokens.size() > max_tokens)
+    {
+      res.message.value = "Prompt has " + std::to_string(tokens.size()) + " tokens, the limit is " + std::to_string(max_tokens);
+      return res;
+    }
+
+    if (!lens_ctx || lens_n_ctx < (int)tokens.size())
+    {
+      if (lens_ctx)
+        llama_free(lens_ctx);
+      lens_n_ctx = std::max(64, (int)tokens.size());
+      auto cparams = llama_context_default_params();
+      cparams.n_ctx = lens_n_ctx;
+      cparams.n_batch = lens_n_ctx;
+      cparams.n_ubatch = lens_n_ctx;
+      cparams.n_seq_max = 1;
+      cparams.n_threads = params.cpuparams.n_threads;
+      cparams.n_threads_batch = params.cpuparams.n_threads;
+      cparams.cb_eval = lens_cb_eval;
+      cparams.cb_eval_user_data = &lens_cap;
+      lens_ctx = llama_init_from_model(const_cast<llama_model *>(model), cparams);
+      if (!lens_ctx)
+      {
+        res.message.value = "Failed to create logit lens context";
+        return res;
+      }
+    }
+    if (!lens_proj)
+    {
+      lens_proj = std::make_unique<lens_projector>();
+      lens_proj->init(model);
+    }
+
+    std::vector<int32_t> targets;
+    if (req.target_ids.not_null())
+      targets = req.target_ids.arr;
+    if (targets.size() == 1 && tokens.size() > 1)
+      targets.assign(tokens.size(), targets[0]);
+
+    const int k = std::max(1, req.k.value);
+    lens_run_output out;
+    try
+    {
+      lens_run(lens_ctx, lens_cap, *lens_proj, tokens, k,
+               req.layer_begin.not_null() ? req.layer_begin.value : 0,
+               req.layer_end.not_null() ? req.layer_end.value : 0,
+               targets, out, reuse);
+    }
+    catch (std::exception &e)
+    {
+      res.message.value = e.what();
+      return res;
+    }
+    lens_tokens = tokens;
+
+    std::vector<int32_t> ids(out.res.top_ids);
+    ids.insert(ids.end(), tokens.begin(), tokens.end());
+    ids.insert(ids.end(), out.res.target_ids.begin(), out.res.target_ids.end());
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    std::vector<std::string> pieces;
+    pieces.reserve(ids.size());
+    for (int32_t id : ids)
+      pieces.push_back(common_token_to_piece(vocab, id, true));
+
+    res.success.value = true;
+    res.message.value = "";
+    res.backend.value = lens_proj->backend_name();
+    res.n_layers.value = out.n_layers;
+    res.n_tokens.value = out.n_tokens;
+    res.k.value = k;
+    res.tokens.arr = tokens;
+    lens_to_raw(out.res.top_ids, res.top_ids);
+    lens_to_raw(out.res.top_probs, res.top_probs);
+    lens_to_raw(out.res.entropy, res.entropy);
+    lens_to_raw(out.res.target_ids, res.target_ids);
+    lens_to_raw(out.res.target_prob, res.target_prob);
+    lens_to_raw(out.res.target_rank, res.target_rank);
+    res.piece_ids.arr = std::move(ids);
+    res.pieces.arr = std::move(pieces);
+    res.t_decode_ms.value = out.t_decode_ms;
+    res.t_project_ms.value = out.t_project_ms;
     return res;
   }
 

@@ -137,3 +137,47 @@ export enum LogLevel {
   WARN = 3,
   ERROR = 4,
 }
+
+export interface LogitLensParams {
+  /** Raw prompt text, tokenized with special tokens parsed */
+  prompt: string;
+  /** Number of top tokens per cell (default 5) */
+  k?: number;
+  /** First layer row to project; row 0 is the token embedding (default 0) */
+  layerBegin?: number;
+  /** End layer row, exclusive (default: all) */
+  layerEnd?: number;
+  /** Token to track per cell: one id for all positions, or one id per position. Default: final layer top-1 per position */
+  targetIds?: number[];
+  /** Reuse hidden states from the previous call (prompt is ignored) */
+  reuse?: boolean;
+  /** Max prompt length in tokens (default 64) */
+  maxTokens?: number;
+}
+
+/**
+ * Logit lens result. Arrays are layer-major: cell index = layer * nTokens + position.
+ * Layer 0 is the token embedding, layer i is the output of block i - 1.
+ */
+export interface LogitLensResult {
+  backend: string;
+  nLayers: number;
+  nTokens: number;
+  k: number;
+  tokens: number[];
+  /** [nLayers * nTokens * k], sorted by probability */
+  topIds: Int32Array;
+  topProbs: Float32Array;
+  /** [nLayers * nTokens], entropy in nats */
+  entropy: Float32Array;
+  targetIds: Int32Array;
+  targetProbs: Float32Array;
+  /** 0 = target is the top token */
+  targetRanks: Int32Array;
+  /** token id -> text piece, for all ids in this result */
+  pieces: Map<number, string>;
+  /** forward pass with capture in ms, 0 when hidden states were reused */
+  tDecodeMs: number;
+  /** output head projection and top-k in ms */
+  tProjectMs: number;
+}

@@ -117,6 +117,7 @@ extern "C" const char *wllama_action(const char *name, const char *req_raw)
     WLLAMA_ACTION(get_result)
     WLLAMA_ACTION(cancel)
     WLLAMA_ACTION(test_backend_ops)
+    WLLAMA_ACTION(logit_lens)
 
     else
     {

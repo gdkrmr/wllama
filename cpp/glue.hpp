@@ -695,3 +695,39 @@ struct glue_msg_test_backend_ops_res
   GLUE_FIELD(int, retcode)
   GLUE_FIELD(bool, success)
 };
+
+/////////
+
+struct glue_msg_logit_lens_req
+{
+  GLUE_HANDLER("lens_req")
+  GLUE_FIELD(str, prompt)
+  GLUE_FIELD(int, k)
+  GLUE_FIELD_NULLABLE(int, layer_begin)
+  GLUE_FIELD_NULLABLE(int, layer_end)
+  GLUE_FIELD_NULLABLE(arr_int, target_ids)
+  GLUE_FIELD_NULLABLE(bool, reuse)
+  GLUE_FIELD_NULLABLE(int, max_tokens)
+};
+
+struct glue_msg_logit_lens_res
+{
+  GLUE_HANDLER("lens_res")
+  GLUE_FIELD(bool, success)
+  GLUE_FIELD(str, message)
+  GLUE_FIELD(str, backend)
+  GLUE_FIELD(int, n_layers)
+  GLUE_FIELD(int, n_tokens)
+  GLUE_FIELD(int, k)
+  GLUE_FIELD(arr_int, tokens)
+  GLUE_FIELD(raw, top_ids)
+  GLUE_FIELD(raw, top_probs)
+  GLUE_FIELD(raw, entropy)
+  GLUE_FIELD(raw, target_ids)
+  GLUE_FIELD(raw, target_prob)
+  GLUE_FIELD(raw, target_rank)
+  GLUE_FIELD(arr_int, piece_ids)
+  GLUE_FIELD(arr_str, pieces)
+  GLUE_FIELD(float, t_decode_ms)
+  GLUE_FIELD(float, t_project_ms)
+};

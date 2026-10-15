@@ -24,12 +24,15 @@ import type {
   GlueMsgGetResultRes,
   GlueMsgLoadRes,
   GlueMsgTestBackendOpsRes,
+  GlueMsgLogitLensRes,
 } from './glue/messages';
 import { LIBLLAMA_VERSION } from './workers-code/generated';
 import type {
   LoadedContextInfo,
   LoadModelParams,
   StreamParams,
+  LogitLensParams,
+  LogitLensResult,
 } from './types/types';
 import type {
   ChatCompletionChunk,
@@ -918,6 +921,53 @@ export class Wllama {
   async exit(): Promise<void> {
     await this.proxy?.wllamaExit();
     this.proxy = null as any;
+  }
+
+  /**
+   * Run the logit lens on a prompt: project each layer's residual stream through the final norm and output head.
+   * Uses a separate context, so it does not affect completion state.
+   * @param params Prompt, top-k and layer range
+   * @returns Top-k tokens, probabilities, entropy and target token stats per (layer, position)
+   */
+  async logitLens(params: LogitLensParams): Promise<LogitLensResult> {
+    this.checkModelLoaded();
+    const result = await this.proxy.wllamaAction<GlueMsgLogitLensRes>(
+      'logit_lens',
+      {
+        _name: 'lens_req',
+        prompt: params.prompt,
+        k: params.k ?? 5,
+        layer_begin: params.layerBegin,
+        layer_end: params.layerEnd,
+        target_ids: params.targetIds,
+        reuse: params.reuse,
+        max_tokens: params.maxTokens,
+      }
+    );
+    if (!result.success) {
+      throw new WllamaError(result.message || 'Logit lens failed', 'inference_error');
+    }
+    // raw fields can be unaligned views, copy before reinterpreting
+    const i32 = (raw: Uint8Array) => new Int32Array(raw.slice().buffer);
+    const f32 = (raw: Uint8Array) => new Float32Array(raw.slice().buffer);
+    const pieces = new Map<number, string>();
+    result.piece_ids.forEach((id, i) => pieces.set(id, result.pieces[i]));
+    return {
+      backend: result.backend,
+      nLayers: result.n_layers,
+      nTokens: result.n_tokens,
+      k: result.k,
+      tokens: result.tokens,
+      topIds: i32(result.top_ids),
+      topProbs: f32(result.top_probs),
+      entropy: f32(result.entropy),
+      targetIds: i32(result.target_ids),
+      targetProbs: f32(result.target_prob),
+      targetRanks: i32(result.target_rank),
+      pieces,
+      tDecodeMs: result.t_decode_ms,
+      tProjectMs: result.t_project_ms,
+    };
   }
 
   /**

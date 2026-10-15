@@ -674,6 +674,140 @@ export const GLUE_MESSAGE_PROTOTYPES: { [name: string]: GlueMessageProto } = {
         "isNullable": false
       }
     ]
+  },
+  "lens_req": {
+    "name": "lens_req",
+    "structName": "glue_msg_logit_lens_req",
+    "className": "GlueMsgLogitLensReq",
+    "fields": [
+      {
+        "type": "str",
+        "name": "prompt",
+        "isNullable": false
+      },
+      {
+        "type": "int",
+        "name": "k",
+        "isNullable": false
+      },
+      {
+        "type": "int",
+        "name": "layer_begin",
+        "isNullable": true
+      },
+      {
+        "type": "int",
+        "name": "layer_end",
+        "isNullable": true
+      },
+      {
+        "type": "arr_int",
+        "name": "target_ids",
+        "isNullable": true
+      },
+      {
+        "type": "bool",
+        "name": "reuse",
+        "isNullable": true
+      },
+      {
+        "type": "int",
+        "name": "max_tokens",
+        "isNullable": true
+      }
+    ]
+  },
+  "lens_res": {
+    "name": "lens_res",
+    "structName": "glue_msg_logit_lens_res",
+    "className": "GlueMsgLogitLensRes",
+    "fields": [
+      {
+        "type": "bool",
+        "name": "success",
+        "isNullable": false
+      },
+      {
+        "type": "str",
+        "name": "message",
+        "isNullable": false
+      },
+      {
+        "type": "str",
+        "name": "backend",
+        "isNullable": false
+      },
+      {
+        "type": "int",
+        "name": "n_layers",
+        "isNullable": false
+      },
+      {
+        "type": "int",
+        "name": "n_tokens",
+        "isNullable": false
+      },
+      {
+        "type": "int",
+        "name": "k",
+        "isNullable": false
+      },
+      {
+        "type": "arr_int",
+        "name": "tokens",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "top_ids",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "top_probs",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "entropy",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "target_ids",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "target_prob",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "target_rank",
+        "isNullable": false
+      },
+      {
+        "type": "arr_int",
+        "name": "piece_ids",
+        "isNullable": false
+      },
+      {
+        "type": "arr_str",
+        "name": "pieces",
+        "isNullable": false
+      },
+      {
+        "type": "float",
+        "name": "t_decode_ms",
+        "isNullable": false
+      },
+      {
+        "type": "float",
+        "name": "t_project_ms",
+        "isNullable": false
+      }
+    ]
   }
 };
 
@@ -872,5 +1006,39 @@ export interface GlueMsgTestBackendOpsRes {
   success: boolean;
 }
 
+// struct glue_msg_logit_lens_req
+export interface GlueMsgLogitLensReq {
+  _name: "lens_req";
+  prompt: string;
+  k: number;
+  layer_begin?: number | undefined;
+  layer_end?: number | undefined;
+  target_ids?: number[] | undefined;
+  reuse?: boolean | undefined;
+  max_tokens?: number | undefined;
+}
 
-export type GlueMsg = GlueMsgError | GlueMsgLoadReq | GlueMsgLoadRes | GlueMsgCompletionReq | GlueMsgCompletionRes | GlueMsgEmbeddingReq | GlueMsgEmbeddingRes | GlueMsgRerankReq | GlueMsgRerankRes | GlueMsgSystemoneReq | GlueMsgSystemoneRes | GlueMsgGetResultReq | GlueMsgGetResultRes | GlueMsgCancelReq | GlueMsgCancelRes | GlueMsgTestBackendOpsReq | GlueMsgTestBackendOpsRes;
+// struct glue_msg_logit_lens_res
+export interface GlueMsgLogitLensRes {
+  _name: "lens_res";
+  success: boolean;
+  message: string;
+  backend: string;
+  n_layers: number;
+  n_tokens: number;
+  k: number;
+  tokens: number[];
+  top_ids: Uint8Array;
+  top_probs: Uint8Array;
+  entropy: Uint8Array;
+  target_ids: Uint8Array;
+  target_prob: Uint8Array;
+  target_rank: Uint8Array;
+  piece_ids: number[];
+  pieces: string[];
+  t_decode_ms: number;
+  t_project_ms: number;
+}
+
+
+export type GlueMsg = GlueMsgError | GlueMsgLoadReq | GlueMsgLoadRes | GlueMsgCompletionReq | GlueMsgCompletionRes | GlueMsgEmbeddingReq | GlueMsgEmbeddingRes | GlueMsgRerankReq | GlueMsgRerankRes | GlueMsgSystemoneReq | GlueMsgSystemoneRes | GlueMsgGetResultReq | GlueMsgGetResultRes | GlueMsgCancelReq | GlueMsgCancelRes | GlueMsgTestBackendOpsReq | GlueMsgTestBackendOpsRes | GlueMsgLogitLensReq | GlueMsgLogitLensRes;

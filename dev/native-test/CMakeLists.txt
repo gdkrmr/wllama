@@ -38,6 +38,7 @@ set(LLAMA_SERVER_SRC
     ${WLLAMA_ROOT}/llama.cpp/tools/server/server-task.cpp
     ${WLLAMA_ROOT}/llama.cpp/tools/server/server-chat.cpp
     ${WLLAMA_ROOT}/llama.cpp/tools/server/server-common.cpp
+    ${WLLAMA_ROOT}/llama.cpp/tools/server/server-decision.cpp
     ${WLLAMA_ROOT}/llama.cpp/tools/server/server-schema.cpp
     ${WLLAMA_ROOT}/llama.cpp/tools/server/server-stream.cpp
 )
