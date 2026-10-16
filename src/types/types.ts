@@ -153,6 +153,8 @@ export interface LogitLensParams {
   reuse?: boolean;
   /** Max prompt length in tokens (default 256) */
   maxTokens?: number;
+  /** If the prompt extends the previous one, run only the new tokens and keep the old columns. Needs default targets, all layers and the same k */
+  incremental?: boolean;
 }
 
 /**

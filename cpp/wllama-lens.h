@@ -390,7 +390,8 @@ static int lens_decode(llama_context *lctx, const std::vector<llama_token> &toke
 
 // run the model on tokens, capture all layers, project layers [layer_begin, layer_end)
 // targets: empty -> per position, use the final layer's top-1 token
-static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &proj, const std::vector<llama_token> &tokens, int k, int layer_begin, int layer_end, const std::vector<int32_t> &targets_per_pos, lens_run_output &out, bool reuse_hidden = false)
+// incremental: out holds the last result of this context; keep the positions that tokens still share, run only the rest
+static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &proj, const std::vector<llama_token> &tokens, int k, int layer_begin, int layer_end, const std::vector<int32_t> &targets_per_pos, lens_run_output &out, bool reuse_hidden = false, bool incremental = false)
 {
   const llama_model *model = llama_get_model(lctx);
   const int n_layer = llama_model_n_layer(model);
@@ -404,13 +405,37 @@ static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &pro
   if (layer_begin >= layer_end)
     throw std::runtime_error("lens: empty layer range");
 
+  llama_memory_t mem = llama_get_memory(lctx);
+  const int n_old = out.n_tokens;
+  int n_keep = 0;
+  if (incremental && !reuse_hidden && targets_per_pos.empty() && layer_begin == 0 && layer_end == n_layer + 1 && out.n_layers == n_layer + 1 && out.res.k == k)
+  {
+    while (n_keep < n_old && n_keep < n_tokens && out.tokens[n_keep] == tokens[n_keep])
+      n_keep++;
+    // memory and hidden states must hold exactly the old tokens
+    bool ok = n_keep > 0 && n_keep < n_tokens && llama_memory_seq_pos_max(mem, 0) == n_old - 1 && (int)cap.hidden.size() == n_layer + 1;
+    for (const auto &h : cap.hidden)
+      ok = ok && (int64_t)h.size() == n_old * cap.n_embd;
+    // recurrent memory cannot drop the tail, then seq_rm fails and we run all tokens
+    if (!ok || !llama_memory_seq_rm(mem, 0, n_keep, -1))
+      n_keep = 0;
+  }
+
   if (!reuse_hidden)
   {
-    cap.reset(llama_model_n_embd(model), n_layer);
-    llama_memory_clear(llama_get_memory(lctx), true);
+    if (n_keep > 0)
+    {
+      for (auto &h : cap.hidden)
+        h.resize(n_keep * cap.n_embd);
+    }
+    else
+    {
+      cap.reset(llama_model_n_embd(model), n_layer);
+      llama_memory_clear(mem, true);
+    }
     const int n_batch = std::min<int>(llama_n_batch(lctx), llama_n_ubatch(lctx));
     const int64_t t0 = ggml_time_us();
-    for (int i0 = 0; i0 < n_tokens; i0 += n_batch)
+    for (int i0 = n_keep; i0 < n_tokens; i0 += n_batch)
     {
       cap.active = true;
       cap.got_embd = false;
@@ -421,10 +446,10 @@ static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &pro
         throw std::runtime_error("lens: llama_decode failed with code " + std::to_string(ret));
     }
     out.t_decode_ms = (ggml_time_us() - t0) / 1000.0;
-    // gemma scales the embeddings after the lookup we capture
+    // gemma scales the embeddings after the lookup we capture; kept rows are already scaled
     if (lens_is_gemma(model))
-      for (float &v : cap.hidden[0])
-        v *= sqrtf((float)cap.n_embd);
+      for (auto it = cap.hidden[0].begin() + (size_t)n_keep * cap.n_embd; it != cap.hidden[0].end(); ++it)
+        *it *= sqrtf((float)cap.n_embd);
   }
 
   const int64_t t_proj0 = ggml_time_us();
@@ -436,8 +461,12 @@ static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &pro
   out.n_layers = n_layers;
   out.n_tokens = n_tokens;
   out.tokens = tokens;
+  lens_result prev = std::move(out.res);
   out.res.reset(n_layers * n_tokens, k);
-  for (int p0 = 0; p0 < n_tokens; p0 += lens_pos_block)
+  for (int l = 0; l < n_layers; l++)
+    for (int t = 0; t < n_keep; t++)
+      out.res.copy_row(prev, l * n_old + t, l * n_tokens + t);
+  for (int p0 = n_keep; p0 < n_tokens; p0 += lens_pos_block)
   {
     const int np = std::min(lens_pos_block, n_tokens - p0);
     std::vector<int32_t> targets;

@@ -942,6 +942,7 @@ export class Wllama {
         target_ids: params.targetIds,
         reuse: params.reuse,
         max_tokens: params.maxTokens,
+        incremental: params.incremental,
       }
     );
     if (!result.success) {
