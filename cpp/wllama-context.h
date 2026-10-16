@@ -285,6 +285,7 @@ struct wllama_context
   lens_capture lens_cap;
   std::unique_ptr<lens_projector> lens_proj;
   std::vector<llama_token> lens_tokens;
+  lens_run_output lens_last; // last run with default targets, base for incremental runs
 
   struct console
   {
@@ -1003,6 +1004,7 @@ struct wllama_context
         res.message.value = "Failed to create logit lens context";
         return res;
       }
+      lens_n_ctx = llama_n_ctx(lens_ctx); // llama.cpp pads n_ctx
     }
     if (!lens_proj)
     {
@@ -1029,20 +1031,27 @@ struct wllama_context
     }
 
     const int k = std::max(1, req.k.value);
+    const bool incremental = req.incremental.not_null() && req.incremental.value && !reuse;
     lens_run_output out;
+    if (incremental)
+      out = lens_last;
     try
     {
       lens_run(lens_ctx, lens_cap, *lens_proj, tokens, k,
                req.layer_begin.not_null() ? req.layer_begin.value : 0,
                req.layer_end.not_null() ? req.layer_end.value : 0,
-               targets, out, reuse);
+               targets, out, reuse, incremental);
     }
     catch (std::exception &e)
     {
+      if (!reuse)
+        lens_last = {};
       res.message.value = e.what();
       return res;
     }
     lens_tokens = tokens;
+    if (!reuse)
+      lens_last = targets.empty() ? out : lens_run_output{};
 
     std::vector<int32_t> ids(out.res.top_ids);
     ids.insert(ids.end(), tokens.begin(), tokens.end());

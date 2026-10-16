@@ -714,6 +714,11 @@ export const GLUE_MESSAGE_PROTOTYPES: { [name: string]: GlueMessageProto } = {
         "type": "int",
         "name": "max_tokens",
         "isNullable": true
+      },
+      {
+        "type": "bool",
+        "name": "incremental",
+        "isNullable": true
       }
     ]
   },
@@ -1021,6 +1026,7 @@ export interface GlueMsgLogitLensReq {
   target_ids?: number[] | undefined;
   reuse?: boolean | undefined;
   max_tokens?: number | undefined;
+  incremental?: boolean | undefined;
 }
 
 // struct glue_msg_logit_lens_res

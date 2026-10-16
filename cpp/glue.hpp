@@ -708,6 +708,7 @@ struct glue_msg_logit_lens_req
   GLUE_FIELD_NULLABLE(arr_int, target_ids)
   GLUE_FIELD_NULLABLE(bool, reuse)
   GLUE_FIELD_NULLABLE(int, max_tokens)
+  GLUE_FIELD_NULLABLE(bool, incremental)
 };
 
 struct glue_msg_logit_lens_res
