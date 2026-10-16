@@ -709,6 +709,7 @@ struct glue_msg_logit_lens_req
   GLUE_FIELD_NULLABLE(bool, reuse)
   GLUE_FIELD_NULLABLE(int, max_tokens)
   GLUE_FIELD_NULLABLE(bool, incremental)
+  GLUE_FIELD_NULLABLE(bool, mtp)
 };
 
 struct glue_msg_logit_lens_res
@@ -732,4 +733,8 @@ struct glue_msg_logit_lens_res
   GLUE_FIELD(arr_str, pieces)
   GLUE_FIELD(float, t_decode_ms)
   GLUE_FIELD(float, t_project_ms)
+  GLUE_FIELD(int, n_mtp)
+  GLUE_FIELD(raw, mtp_top_ids)
+  GLUE_FIELD(raw, mtp_top_probs)
+  GLUE_FIELD(raw, mtp_entropy)
 };

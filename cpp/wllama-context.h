@@ -286,6 +286,7 @@ struct wllama_context
   std::unique_ptr<lens_projector> lens_proj;
   std::vector<llama_token> lens_tokens;
   lens_run_output lens_last; // last run with default targets, base for incremental runs
+  lens_mtp lens_nextn;       // MTP context, made on the first run with mtp
 
   struct console
   {
@@ -449,6 +450,7 @@ struct wllama_context
       params.model_alias.insert(req.model_alias.value);
 
     params.n_ctx = req.n_ctx.value;
+    params.load_mtp = true; // NextN block for the lens MTP rows; no-op for models without it
     params.cpuparams.n_threads = req.n_threads.value;
     params.cpuparams_batch.n_threads = req.n_threads.value;
     if (req.embeddings.not_null())
@@ -966,6 +968,7 @@ struct wllama_context
     res.k.value = 0;
     res.t_decode_ms.value = 0;
     res.t_project_ms.value = 0;
+    res.n_mtp.value = 0;
 
     std::string arch;
     if (!lens_arch_supported(model, arch))
@@ -983,10 +986,14 @@ struct wllama_context
       return res;
     }
 
+    const bool mtp = req.mtp.not_null() && req.mtp.value && lens_has_mtp(model);
     if (!lens_ctx || lens_n_ctx < (int)tokens.size())
     {
       if (lens_ctx)
         llama_free(lens_ctx);
+      if (lens_nextn.ctx)
+        llama_free(lens_nextn.ctx);
+      lens_nextn.ctx = nullptr;
       // round up, so a growing prompt does not recreate the context on every token
       lens_n_ctx = std::max(1, ((int)tokens.size() + lens_batch - 1) / lens_batch) * lens_batch;
       auto cparams = llama_context_default_params();
@@ -1006,6 +1013,28 @@ struct wllama_context
       }
       lens_n_ctx = llama_n_ctx(lens_ctx); // llama.cpp pads n_ctx
     }
+    if (mtp && !lens_nextn.ctx)
+    {
+      auto cparams = llama_context_default_params();
+      cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+      cparams.n_ctx = lens_n_ctx;
+      cparams.n_batch = lens_batch;
+      cparams.n_ubatch = lens_batch;
+      cparams.n_seq_max = 1;
+      cparams.n_threads = params.cpuparams.n_threads;
+      cparams.n_threads_batch = params.cpuparams.n_threads;
+      cparams.cb_eval = lens_cb_eval;
+      cparams.cb_eval_user_data = &lens_nextn.cap;
+      lens_nextn.ctx = llama_init_from_model(const_cast<llama_model *>(model), cparams);
+      if (!lens_nextn.ctx)
+      {
+        res.message.value = "Failed to create MTP lens context";
+        return res;
+      }
+    }
+    // a run without MTP leaves the MTP states behind its tokens
+    if (!mtp && !reuse)
+      lens_nextn.cap.hidden.clear();
     if (!lens_proj)
     {
       lens_proj = std::make_unique<lens_projector>();
@@ -1040,7 +1069,7 @@ struct wllama_context
       lens_run(lens_ctx, lens_cap, *lens_proj, tokens, k,
                req.layer_begin.not_null() ? req.layer_begin.value : 0,
                req.layer_end.not_null() ? req.layer_end.value : 0,
-               targets, out, reuse, incremental);
+               targets, out, reuse, incremental, mtp ? &lens_nextn : nullptr);
     }
     catch (std::exception &e)
     {
@@ -1056,6 +1085,9 @@ struct wllama_context
     std::vector<int32_t> ids(out.res.top_ids);
     ids.insert(ids.end(), tokens.begin(), tokens.end());
     ids.insert(ids.end(), out.res.target_ids.begin(), out.res.target_ids.end());
+    for (int32_t id : out.mtp.top_ids)
+      if (id >= 0) // -1 marks the last position, it has no MTP guess
+        ids.push_back(id);
     std::sort(ids.begin(), ids.end());
     ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
     std::vector<std::string> pieces;
@@ -1077,6 +1109,10 @@ struct wllama_context
     lens_to_raw(out.res.target_prob, res.target_prob);
     lens_to_raw(out.res.target_rank, res.target_rank);
     lens_to_raw(out.res.kl, res.kl);
+    res.n_mtp.value = out.n_mtp;
+    lens_to_raw(out.mtp.top_ids, res.mtp_top_ids);
+    lens_to_raw(out.mtp.top_probs, res.mtp_top_probs);
+    lens_to_raw(out.mtp.entropy, res.mtp_entropy);
     res.piece_ids.arr = std::move(ids);
     res.pieces.arr = std::move(pieces);
     res.t_decode_ms.value = out.t_decode_ms;

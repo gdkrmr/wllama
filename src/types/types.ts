@@ -155,6 +155,8 @@ export interface LogitLensParams {
   maxTokens?: number;
   /** If the prompt extends the previous one, run only the new tokens and keep the old columns. Needs default targets, all layers and the same k */
   incremental?: boolean;
+  /** Also run the model's MTP (NextN) block, if it has one; see LogitLensResult.nMtp */
+  mtp?: boolean;
 }
 
 /**
@@ -184,4 +186,14 @@ export interface LogitLensResult {
   tDecodeMs: number;
   /** output head projection and top-k in ms */
   tProjectMs: number;
+  /** MTP stages (after eh_proj, after attention, block output), 0 if MTP was not asked for or the model has none */
+  nMtp: number;
+  /**
+   * [nMtp * nTokens * k], cell = stage * nTokens + t: the NextN block reads the hidden state at t and token t + 1 and guesses token t + 2.
+   * The last position has no guess, its ids are -1.
+   */
+  mtpTopIds: Int32Array;
+  mtpTopProbs: Float32Array;
+  /** [nMtp * nTokens], entropy in nats */
+  mtpEntropy: Float32Array;
 }

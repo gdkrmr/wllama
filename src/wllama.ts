@@ -943,6 +943,7 @@ export class Wllama {
         reuse: params.reuse,
         max_tokens: params.maxTokens,
         incremental: params.incremental,
+        mtp: params.mtp,
       }
     );
     if (!result.success) {
@@ -969,6 +970,10 @@ export class Wllama {
       pieces,
       tDecodeMs: result.t_decode_ms,
       tProjectMs: result.t_project_ms,
+      nMtp: result.n_mtp,
+      mtpTopIds: i32(result.mtp_top_ids),
+      mtpTopProbs: f32(result.mtp_top_probs),
+      mtpEntropy: f32(result.mtp_entropy),
     };
   }
 

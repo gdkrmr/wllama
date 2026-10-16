@@ -719,6 +719,11 @@ export const GLUE_MESSAGE_PROTOTYPES: { [name: string]: GlueMessageProto } = {
         "type": "bool",
         "name": "incremental",
         "isNullable": true
+      },
+      {
+        "type": "bool",
+        "name": "mtp",
+        "isNullable": true
       }
     ]
   },
@@ -815,6 +820,26 @@ export const GLUE_MESSAGE_PROTOTYPES: { [name: string]: GlueMessageProto } = {
       {
         "type": "float",
         "name": "t_project_ms",
+        "isNullable": false
+      },
+      {
+        "type": "int",
+        "name": "n_mtp",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "mtp_top_ids",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "mtp_top_probs",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "mtp_entropy",
         "isNullable": false
       }
     ]
@@ -1027,6 +1052,7 @@ export interface GlueMsgLogitLensReq {
   reuse?: boolean | undefined;
   max_tokens?: number | undefined;
   incremental?: boolean | undefined;
+  mtp?: boolean | undefined;
 }
 
 // struct glue_msg_logit_lens_res
@@ -1050,6 +1076,10 @@ export interface GlueMsgLogitLensRes {
   pieces: string[];
   t_decode_ms: number;
   t_project_ms: number;
+  n_mtp: number;
+  mtp_top_ids: Uint8Array;
+  mtp_top_probs: Uint8Array;
+  mtp_entropy: Uint8Array;
 }
 
 
