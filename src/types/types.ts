@@ -157,6 +157,8 @@ export interface LogitLensParams {
   incremental?: boolean;
   /** Also run the model's MTP (NextN) block, if it has one; see LogitLensResult.nMtp */
   mtp?: boolean;
+  /** With mtp: draft this many tokens after the prompt, chained like llama.cpp's MTP speculative draft (max 16) */
+  mtpDraft?: number;
 }
 
 /**
@@ -196,4 +198,13 @@ export interface LogitLensResult {
   mtpTopProbs: Float32Array;
   /** [nMtp * nTokens], entropy in nats */
   mtpEntropy: Float32Array;
+  /** MTP draft steps after the prompt, 0 without mtpDraft */
+  nDraft: number;
+  /** [nDraft + 1]: x1 (main model top-1 at the last position), then the drafts; step j reads draftTokens[j] and guesses draftTokens[j + 1] */
+  draftTokens: Int32Array;
+  /** [nMtp * nDraft * k], cell = stage * nDraft + j */
+  draftTopIds: Int32Array;
+  draftTopProbs: Float32Array;
+  /** [nMtp * nDraft], entropy in nats */
+  draftEntropy: Float32Array;
 }

@@ -944,6 +944,7 @@ export class Wllama {
         max_tokens: params.maxTokens,
         incremental: params.incremental,
         mtp: params.mtp,
+        mtp_draft: params.mtpDraft,
       }
     );
     if (!result.success) {
@@ -974,6 +975,11 @@ export class Wllama {
       mtpTopIds: i32(result.mtp_top_ids),
       mtpTopProbs: f32(result.mtp_top_probs),
       mtpEntropy: f32(result.mtp_entropy),
+      nDraft: result.n_draft,
+      draftTokens: i32(result.draft_tokens),
+      draftTopIds: i32(result.draft_top_ids),
+      draftTopProbs: f32(result.draft_top_probs),
+      draftEntropy: f32(result.draft_entropy),
     };
   }
 

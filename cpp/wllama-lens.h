@@ -17,6 +17,8 @@
 
 // internal header, needed for output_norm / output weights
 #include "../llama.cpp/src/llama-model.h"
+// staging API: llama_set_embeddings_nextn / llama_get_embeddings_nextn_ith, for the MTP draft
+#include "../llama.cpp/src/llama-ext.h"
 
 // tokens per llama_decode call; bounds the logits buffers llama.cpp allocates (n_vocab floats per token)
 static const int lens_batch = 64;
@@ -30,6 +32,7 @@ struct lens_capture
   bool active = false;
   bool got_embd = false; // per decode call
   bool stop = false;     // per decode call, set after the last layer
+  bool full = false;     // do not stop after the last slot, run the whole graph
   bool mtp = false;      // MTP context: hidden[s] is stage s of lens_mtp_names
   bool with_h = false;   // main context: also keep h_nextn, the MTP input (final norm of the last layer)
   int64_t n_embd = 0;
@@ -87,7 +90,7 @@ static bool lens_cb_eval(ggml_tensor *t, bool ask, void *user_data)
     ggml_backend_tensor_get(t, dst.data() + n0, 0, ggml_nbytes(t));
     cap->got_embd |= slot == 0;
     // false stops the rest of this split, so the output head is not computed
-    cap->stop = slot == last;
+    cap->stop = !cap->full && slot == last;
   }
   return !cap->stop;
 }
@@ -399,6 +402,11 @@ struct lens_run_output
   // the last position has no token t + 1, its top ids are -1
   int n_mtp = 0; // 0 = no MTP rows
   lens_result mtp;
+  // chained MTP draft after the prompt: step j reads draft_tokens[j] (x1 = main model top-1 at the last position) and guesses draft_tokens[j + 1]
+  // row = stage * n_draft + j
+  int n_draft = 0;
+  std::vector<llama_token> draft_tokens; // n_draft + 1 entries, or empty
+  lens_result draft;
   double t_decode_ms = 0;  // forward pass with capture, 0 when hidden states are reused
   double t_project_ms = 0; // output head projection and top-k
 };
@@ -441,6 +449,7 @@ struct lens_mtp
 {
   llama_context *ctx = nullptr;
   lens_capture cap; // cap.mtp = true; row p is the MTP input (h at p - 1, token p)
+  int n_draft = 0;   // tokens to draft after the prompt
 };
 
 // MTP rows [i0, i0 + n): token p with h_nextn of p - 1; row 0 gets a zero h, like llama.cpp's MTP draft
@@ -459,6 +468,63 @@ static int lens_mtp_decode(llama_context *mctx, const std::vector<llama_token> &
   const int ret = llama_process(mctx, LLAMA_PROCESS_TYPE_DECODE, batch);
   llama_batch_ext_free(batch);
   return ret;
+}
+
+// chained MTP draft like llama.cpp's draft-mtp (common/speculative.cpp): step j decodes draft token j at pos0 + j with the h_nextn of the step before, the guess is the argmax
+// h: h_nextn of the main model at pos0 - 1; the draft rows are removed from the MTP KV cache again
+static void lens_mtp_draft(lens_mtp &mtp, lens_projector &proj, const float *h, llama_token x1, llama_pos pos0, int k, lens_run_output &out)
+{
+  llama_context *mctx = mtp.ctx;
+  const int64_t n_embd = mtp.cap.n_embd;
+  const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(mctx)));
+  std::vector<float> h_cur(h, h + n_embd);
+  std::vector<std::vector<float>> forced = std::move(mtp.cap.hidden);
+  mtp.cap.hidden.assign(lens_mtp_stages, {});
+  out.draft_tokens = {x1};
+  llama_set_embeddings_nextn(mctx, true, true);
+  int ret = 0;
+  for (int j = 0; j < mtp.n_draft && pos0 + j < (llama_pos)llama_n_ctx(mctx); j++)
+  {
+    const llama_pos p = pos0 + j;
+    llama_batch_ext *batch = llama_batch_ext_init(mctx);
+    const int32_t idx = llama_batch_ext_add_token(batch, 0, out.draft_tokens.back());
+    llama_batch_ext_set_pos(batch, idx, &p);
+    llama_batch_ext_set_embd_state(batch, idx, {h_cur.data(), 1, (size_t)n_embd});
+    llama_batch_ext_set_output_logits(batch, idx, true);
+    mtp.cap.active = mtp.cap.full = true;
+    mtp.cap.stop = false;
+    ret = llama_process(mctx, LLAMA_PROCESS_TYPE_DECODE, batch);
+    mtp.cap.active = mtp.cap.full = false;
+    llama_batch_ext_free(batch);
+    if (ret != 0)
+      break;
+    const float *logits = llama_get_logits_ith(mctx, idx);
+    llama_token best = 0;
+    for (int v = 1; v < n_vocab; v++)
+      if (logits[v] > logits[best])
+        best = v;
+    out.draft_tokens.push_back(best);
+    const float *hn = llama_get_embeddings_nextn_ith(mctx, idx);
+    h_cur.assign(hn, hn + n_embd);
+  }
+  llama_set_embeddings_nextn(mctx, false, false);
+  llama_memory_seq_rm(llama_get_memory(mctx), 0, pos0, -1);
+  std::vector<std::vector<float>> rows_cap = std::move(mtp.cap.hidden);
+  mtp.cap.hidden = std::move(forced);
+  if (ret != 0)
+    throw std::runtime_error("lens: MTP draft decode failed with code " + std::to_string(ret));
+  out.n_draft = (int)out.draft_tokens.size() - 1;
+  if (out.n_draft == 0)
+  {
+    out.draft_tokens.clear();
+    return;
+  }
+  std::vector<float> rows;
+  for (const auto &r : rows_cap)
+    rows.insert(rows.end(), r.begin(), r.end());
+  if ((int64_t)rows.size() != lens_mtp_stages * out.n_draft * n_embd)
+    throw std::runtime_error("lens: missing MTP draft states");
+  proj.project(rows.data(), lens_mtp_stages * out.n_draft, k, nullptr, out.draft, nullptr, false, true);
 }
 
 // run the model on tokens, capture all layers, project layers [layer_begin, layer_end)
@@ -566,6 +632,9 @@ static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &pro
   lens_result prev = std::move(out.res);
   lens_result prev_mtp = std::move(out.mtp);
   out.n_mtp = 0;
+  out.n_draft = 0;
+  out.draft_tokens.clear();
+  llama_token x1 = -1; // final layer top-1 at the last position
   out.res.reset(n_layers * n_tokens, k);
   for (int l = 0; l < n_layers; l++)
     for (int t = 0; t < n_keep; t++)
@@ -584,6 +653,8 @@ static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &pro
       proj.project(last.data(), np, 1, nullptr, r, nullptr, true);
       if (targets.empty())
         targets = r.top_ids; // final layer top-1 per position
+      if (p0 + np == n_tokens)
+        x1 = r.top_ids[np - 1];
     }
 
     std::vector<float> rows = lens_gather_rows(cap, n_tokens, layer_begin, layer_end, p0, p0 + np);
@@ -629,5 +700,13 @@ static void lens_run(llama_context *lctx, lens_capture &cap, lens_projector &pro
           out.mtp.copy_row(r, s * np + i, s * n_tokens + p0 + i - 1);
     }
   }
-  out.t_project_ms = (ggml_time_us() - t_proj0) / 1000.0;
+  int64_t t_draft = 0;
+  if (mtp_ok && !reuse_hidden && mtp->n_draft > 0 && x1 >= 0)
+  {
+    t_draft = ggml_time_us();
+    lens_mtp_draft(*mtp, proj, cap.h_nextn.data() + (n_tokens - 1) * cap.n_embd, x1, n_tokens, k, out);
+    t_draft = ggml_time_us() - t_draft;
+    out.t_decode_ms += t_draft / 1000.0;
+  }
+  out.t_project_ms = (ggml_time_us() - t_proj0 - t_draft) / 1000.0;
 }

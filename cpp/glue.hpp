@@ -710,6 +710,7 @@ struct glue_msg_logit_lens_req
   GLUE_FIELD_NULLABLE(int, max_tokens)
   GLUE_FIELD_NULLABLE(bool, incremental)
   GLUE_FIELD_NULLABLE(bool, mtp)
+  GLUE_FIELD_NULLABLE(int, mtp_draft)
 };
 
 struct glue_msg_logit_lens_res
@@ -737,4 +738,9 @@ struct glue_msg_logit_lens_res
   GLUE_FIELD(raw, mtp_top_ids)
   GLUE_FIELD(raw, mtp_top_probs)
   GLUE_FIELD(raw, mtp_entropy)
+  GLUE_FIELD(int, n_draft)
+  GLUE_FIELD(raw, draft_tokens)
+  GLUE_FIELD(raw, draft_top_ids)
+  GLUE_FIELD(raw, draft_top_probs)
+  GLUE_FIELD(raw, draft_entropy)
 };

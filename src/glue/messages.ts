@@ -724,6 +724,11 @@ export const GLUE_MESSAGE_PROTOTYPES: { [name: string]: GlueMessageProto } = {
         "type": "bool",
         "name": "mtp",
         "isNullable": true
+      },
+      {
+        "type": "int",
+        "name": "mtp_draft",
+        "isNullable": true
       }
     ]
   },
@@ -840,6 +845,31 @@ export const GLUE_MESSAGE_PROTOTYPES: { [name: string]: GlueMessageProto } = {
       {
         "type": "raw",
         "name": "mtp_entropy",
+        "isNullable": false
+      },
+      {
+        "type": "int",
+        "name": "n_draft",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "draft_tokens",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "draft_top_ids",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "draft_top_probs",
+        "isNullable": false
+      },
+      {
+        "type": "raw",
+        "name": "draft_entropy",
         "isNullable": false
       }
     ]
@@ -1053,6 +1083,7 @@ export interface GlueMsgLogitLensReq {
   max_tokens?: number | undefined;
   incremental?: boolean | undefined;
   mtp?: boolean | undefined;
+  mtp_draft?: number | undefined;
 }
 
 // struct glue_msg_logit_lens_res
@@ -1080,6 +1111,11 @@ export interface GlueMsgLogitLensRes {
   mtp_top_ids: Uint8Array;
   mtp_top_probs: Uint8Array;
   mtp_entropy: Uint8Array;
+  n_draft: number;
+  draft_tokens: Uint8Array;
+  draft_top_ids: Uint8Array;
+  draft_top_probs: Uint8Array;
+  draft_entropy: Uint8Array;
 }
 
 

@@ -969,6 +969,7 @@ struct wllama_context
     res.t_decode_ms.value = 0;
     res.t_project_ms.value = 0;
     res.n_mtp.value = 0;
+    res.n_draft.value = 0;
 
     std::string arch;
     if (!lens_arch_supported(model, arch))
@@ -987,7 +988,10 @@ struct wllama_context
     }
 
     const bool mtp = req.mtp.not_null() && req.mtp.value && lens_has_mtp(model);
-    if (!lens_ctx || lens_n_ctx < (int)tokens.size())
+    lens_nextn.n_draft = mtp && req.mtp_draft.not_null() ? std::max(0, std::min(req.mtp_draft.value, 16)) : 0;
+    // the draft rows go after the prompt in the MTP context
+    const int n_need = (int)tokens.size() + lens_nextn.n_draft;
+    if (!lens_ctx || lens_n_ctx < n_need)
     {
       if (lens_ctx)
         llama_free(lens_ctx);
@@ -995,7 +999,7 @@ struct wllama_context
         llama_free(lens_nextn.ctx);
       lens_nextn.ctx = nullptr;
       // round up, so a growing prompt does not recreate the context on every token
-      lens_n_ctx = std::max(1, ((int)tokens.size() + lens_batch - 1) / lens_batch) * lens_batch;
+      lens_n_ctx = std::max(1, (n_need + lens_batch - 1) / lens_batch) * lens_batch;
       auto cparams = llama_context_default_params();
       cparams.n_ctx = lens_n_ctx;
       cparams.n_batch = lens_batch;
@@ -1088,6 +1092,8 @@ struct wllama_context
     for (int32_t id : out.mtp.top_ids)
       if (id >= 0) // -1 marks the last position, it has no MTP guess
         ids.push_back(id);
+    ids.insert(ids.end(), out.draft.top_ids.begin(), out.draft.top_ids.end());
+    ids.insert(ids.end(), out.draft_tokens.begin(), out.draft_tokens.end());
     std::sort(ids.begin(), ids.end());
     ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
     std::vector<std::string> pieces;
@@ -1113,6 +1119,11 @@ struct wllama_context
     lens_to_raw(out.mtp.top_ids, res.mtp_top_ids);
     lens_to_raw(out.mtp.top_probs, res.mtp_top_probs);
     lens_to_raw(out.mtp.entropy, res.mtp_entropy);
+    res.n_draft.value = out.n_draft;
+    lens_to_raw(out.draft_tokens, res.draft_tokens);
+    lens_to_raw(out.draft.top_ids, res.draft_top_ids);
+    lens_to_raw(out.draft.top_probs, res.draft_top_probs);
+    lens_to_raw(out.draft.entropy, res.draft_entropy);
     res.piece_ids.arr = std::move(ids);
     res.pieces.arr = std::move(pieces);
     res.t_decode_ms.value = out.t_decode_ms;
