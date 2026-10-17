@@ -592,6 +592,9 @@ export class Wllama {
       skip_chat_parsing: params.skip_chat_parsing,
       prefill_assistant: params.prefill_assistant,
     });
+    if (!loadResult.success) {
+      throw new WllamaError('llama.cpp could not load the model', 'load_error');
+    }
     const loadedCtxInfo: LoadedContextInfo & GlueMsgLoadRes = {
       ...loadResult,
       metadata: {},
