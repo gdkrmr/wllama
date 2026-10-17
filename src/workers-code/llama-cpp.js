@@ -96,7 +96,8 @@ const getWModuleConfig = (_argMainScriptBlob) => {
     mainScriptUrlOrBlob: hasMultithread
       ? argMainScriptBlob
       : 'throw new Error("Multithreading is not enabled")',
-    pthreadPoolSize: hasMultithread ? pthreadPoolSize : 0,
+    // server threadpool keeps n-1 workers, lens contexts need n-1 more; Chrome cannot start a new worker while wasm runs, so a short pool hangs
+    pthreadPoolSize: hasMultithread ? 2 * pthreadPoolSize : 0,
     wasmMemory: hasMultithread ? getWasmMemory() : null,
     onAbort: function (message) {
       isAborted = true;
